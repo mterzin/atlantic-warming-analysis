@@ -24,7 +24,7 @@ See `requirements.txt` for Python dependencies.
 
 ## Data Location
 
-Scripts expect data in: `/home/marko-terzin/Documents/co-authored_papers/NoSoAt_modelling_paper/Marko_analysis/`
+To check with Tido how we can descript where the data can be downloaded from.
 
 ## Outputs
 
