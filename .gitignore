@@ -1,0 +1,27 @@
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Data files (too large for GitHub)
+DATA-*/
+*.zip
+*.nc
+*.txt.dat
+
+# Output plots and documents (optional - share separately)
+Cross-sections/
+*.pdf
+*.odt
+*.png
+*.html
+
+# IDE files
+.vscode/
+.idea/
+.Rhistory
