@@ -59,8 +59,11 @@ def load_thermo_data_with_years():
             valid &= (lats >= -35) & (lats <= 55)
             valid &= (temps > -5) & (temps < 40)
             
-            # Western Africa route longitude filter
-            north_mask = (lats >= 0) & (lons >= -35) & (lons <= -5)
+            # CHANGE 1: Fixed northern hemisphere longitude filter to include Bremerhaven (8.5°E)
+            # Old code: north_mask = (lats >= 0) & (lons >= -35) & (lons <= -5)
+            north_mask_europe = (lats >= 45) & (lons >= -10) & (lons <= 15)  # European waters including Bremerhaven
+            north_mask_africa = (lats >= 0) & (lats < 45) & (lons >= -35) & (lons <= -5)  # West African coast
+            north_mask = north_mask_europe | north_mask_africa
             south_mask = (lats < 0) & (lons >= -20) & (lons <= 20)
             valid &= (north_mask | south_mask)
             
@@ -113,8 +116,8 @@ for year, data in data_by_year.items():
     lat_min = lats.min()
     lat_max = lats.max()
     
-    # Check if it reaches Germany in the north and Namibia in the south
-    if lat_max >= 45 and lat_min <= -25:
+    # CHANGE 2: Increased northern latitude threshold to reach Bremerhaven (52°N instead of 45°N)
+    if lat_max >= 52 and lat_min <= -23:
         # Sort by latitude for the transect plot
         sort_idx = np.argsort(lats)
         lats_sorted = lats[sort_idx]
@@ -164,7 +167,8 @@ print(f"\n📊 Final: Found {len(full_transects)} transects")
 # ============================================
 print("\n📊 Computing median transect...")
 
-common_lats = np.linspace(-30, 52, 500)  # High resolution for sampling
+# CHANGE 3: Extended latitude range to include Bremerhaven (53.5°N instead of 52°N)
+common_lats = np.linspace(-30, 53.5, 500)  # High resolution for sampling
 all_interpolated = []
 all_longitudes_interp = []
 
