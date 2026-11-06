@@ -1,7 +1,19 @@
 #!/usr/bin/env python3
 """
-04_cross-sections.py - COMPREHENSIVE HTML REPORT GENERATOR WITH PDF EXPORT
+04_cross-sections_defined_time-periods.py - CROSS-SECTIONS, DIFFERENCE MAPS, BOXPLOTS
 Generates an HTML report AND saves all plots as PDF files
+
+November 2026 revision (branch ond-1993-2002-periods), following Tido's request
+to match the observational periods used for the TSG/XBT composites:
+  - Baseline 1993-2002, comparison periods 2003-2014 and 2015-2025, OND only,
+    identical for GLORYS, ORAS5 and CMCC-ESM2 (no more period relabelling).
+  - Reads ONLY the new DATA_OND_1993-2025 folder (the old version searched
+    Marko_analysis/ recursively and could mix old and new files).
+  - Reuses the FIXED 100-point transect CSV from the previous run.
+  - EC-Earth3 removed (no new files; excluded from the paper).
+  - Extra 0-700 m difference sections for comparison with the XBT section (Fig. 5).
+  - Statistics now include median, n and latitude-band summaries.
+Run 00_check_input_files.py first to verify the input files.
 """
 
 import xarray as xr
@@ -12,17 +24,60 @@ from pathlib import Path
 import pandas as pd
 import base64
 from io import BytesIO
+from datetime import datetime
 import warnings
 warnings.filterwarnings('ignore')
 
 # ============================================
 # CONFIGURATION
 # ============================================
-data_dir = Path("/home/marko-terzin/Documents/co-authored_papers/NoSoAt_modelling_paper/Marko_analysis/")
-plots_dir = Path("/home/marko-terzin/Documents/co-authored_papers/NoSoAt_modelling_paper/Marko_analysis/Cross-sections/Plots")
-stats_dir = Path("/home/marko-terzin/Documents/co-authored_papers/NoSoAt_modelling_paper/Marko_analysis/Cross-sections/Statistics")
+analysis_dir = Path.home() / "Documents/co-authored_papers/NoSoAt_modelling_paper/Marko_analysis"
+
+# CHANGE: new input folder only (one subfolder per product)
+data_dir = analysis_dir / "DATA_OND_1993-2025"
+
+# CHANGE: new output folders, so the old plots/statistics stay untouched
+plots_dir = analysis_dir / "Cross-sections/Plots_OND_1993-2002_baseline"
+stats_dir = analysis_dir / "Cross-sections/Statistics_OND_1993-2002_baseline"
 plots_dir.mkdir(parents=True, exist_ok=True)
 stats_dir.mkdir(parents=True, exist_ok=True)
+
+# CHANGE: the 100 sampling points are read from the ORIGINAL run (do not regenerate)
+TRANSECT_CSV = analysis_dir / "Cross-sections/Plots/Polarstern_median_transect_100points.csv"
+
+# CHANGE: periods now match the observational composites (TSG/XBT)
+BASELINE_PERIOD = '1993-2002'
+COMPARISON_PERIODS = ['2003-2014', '2015-2025']
+ALL_PERIODS = [BASELINE_PERIOD] + COMPARISON_PERIODS
+
+# Products: (name, subfolder/glob pattern, extraction function name)
+PRODUCTS = [
+    ('GLORYS', 'GLORYS/*OND*.nc', 'extract_from_regular_grid'),
+    ('ORAS5', 'ORAS5/*OND*.nc', 'extract_from_oras5'),
+    ('CMCC-ESM2', 'CMCC-ESM2/*OND*.nc', 'extract_from_curvilinear_grid'),
+]
+
+# Upper-panel depth limits for the difference sections:
+# 1000 m as in the draft Fig. 2, plus 700 m to match the XBT section (Fig. 5)
+UPPER_DEPTHS = [1000, 700]
+
+# Shared colour scale for ALL difference sections (degC)
+DIFF_VMIN, DIFF_VMAX = -2, 2
+
+# CHANGE: the old boxplots removed values beyond 3 standard deviations before
+# drawing. This made the boxes differ from the statistics CSV and from the
+# caption. Default is now False (no trimming); set True to reproduce the old style.
+TRIM_3SIGMA = False
+
+# Latitude bands for the text (degrees N; south negative). Bands may overlap.
+LAT_BANDS = [
+    ("South (30-20S)", -31.0, -20.0),
+    ("XBT southern cooling band (20-10S)", -20.0, -10.0),
+    ("Tropics (20S-20N)", -20.0, 20.0),
+    ("XBT northern cooling band (10-20N)", 10.0, 20.0),
+    ("North (25-50N)", 25.0, 50.0),
+]
+BAND_DEPTH_RANGES = [(0, 100), (100, 200), (0, 700), (500, 1000), (500, 2000), (1000, 2000)]
 
 print("="*80)
 print("GENERATING COMPREHENSIVE HTML REPORT AND PDF EXPORTS")
@@ -43,7 +98,7 @@ def save_figure_as_pdf(fig, filename, subfolder=""):
 # ============================================
 print("\n📂 Loading Polarstern median transect coordinates...")
 
-transect_csv = plots_dir / "Polarstern_median_transect_100points.csv"
+transect_csv = TRANSECT_CSV
 if not transect_csv.exists():
     print(f"   ❌ Error: {transect_csv} not found!")
     exit(1)
@@ -55,31 +110,24 @@ transect_lats = transect_df['latitude'].values
 transect_lons = transect_df['longitude'].values
 transect_name = "POLARSTERN MEDIAN TRANSECT (Bremerhaven to Namibia)"
 
-print(f"   Loaded {len(transect_lats)} points ({transect_lats.min():.1f}°S to {transect_lats.max():.1f}°N)")
+print(f"   Loaded {len(transect_lats)} points ({transect_lats.min():.1f}° to {transect_lats.max():.1f}°N) from {transect_csv}")
 
 # ============================================
 # PART 2: PERIOD DETECTION FUNCTION (FIXED FOR ORAS5)
 # ============================================
 def get_period_from_filename(filepath):
-    """FIXED: Maps ORAS5 1981-2000 and 1993-2000 to baseline period 1993-2002"""
+    """Return the period named in the file name, matched EXACTLY.
+
+    CHANGE: the previous version relabelled 1981-2000 and 1993-2000 files as
+    '1993-2002' and 2001-2020 files as '2003-2020'. The draft figures were
+    therefore labelled with periods that differ from the data plotted.
+    Now only exact matches are accepted; anything else is 'unknown'.
+    """
     fname = str(filepath.name)
-    
-    # Period 2: 2021-2025
-    if '2021-2025' in fname or '2021_2025' in fname:
-        return '2021-2025'
-    
-    # Period 1: 2003-2020
-    elif '2003-2020' in fname or '2003_2020' in fname or '2001-2020' in fname or '2001_2020' in fname:
-        return '2003-2020'
-    
-    # Baseline: 1993-2002 (including ORAS5 1981-2000 and 1993-2000)
-    elif '1993-2002' in fname or '1993_2002' in fname or '1993-2000' in fname or '1993_2000' in fname:
-        return '1993-2002'
-    elif '1981-2000' in fname or '1981_2000' in fname:
-        return '1993-2002'  # Map ORAS5 1981-2000 to baseline
-    
-    else:
-        return 'unknown'
+    for period in ALL_PERIODS:
+        if period in fname or period.replace('-', '_') in fname:
+            return period
+    return 'unknown'
 
 # ============================================
 # PART 3: EXTRACTION FUNCTIONS
@@ -214,10 +262,13 @@ def extract_from_regular_grid(ds, lats, lons):
             method='linear'
         )
         if depth_name and depth_name in extracted.dims:
-            result = extracted.values
+            result = extracted.transpose(depth_name, 'transect').values
         else:
             result = extracted.values.reshape(1, -1)
-        return result, np.ones(len(lats), dtype=bool)
+        # CHANGE: report points that are NaN at all depths (e.g. land/coast),
+        # instead of marking every point as valid
+        valid_mask = ~np.isnan(result).all(axis=0)
+        return result, valid_mask
     except:
         lat_vals = ds[lat_name].values
         lon_vals = ds[lon_name].values
@@ -246,14 +297,20 @@ def extract_from_regular_grid(ds, lats, lons):
 # PART 4: LOAD DATASETS
 # ============================================
 
+input_files_used = []  # recorded in run_info.txt
+
 def load_dataset_files(pattern, dataset_name, loader_func):
+    # CHANGE: non-recursive search inside DATA_OND_1993-2025/<product>/ only
     files = sorted(data_dir.glob(pattern))
     data_dict = {}
     for file_path in files:
         period = get_period_from_filename(file_path)
         if period == 'unknown':
-            # Skip unknown periods but don't print warning for every file
+            print(f"   ⚠️ {dataset_name}: skipping {file_path.name} (period not in {ALL_PERIODS})")
             continue
+        if period in data_dict:
+            raise RuntimeError(f"{dataset_name}: two files for period {period}; "
+                               f"remove one from {file_path.parent}")
         try:
             ds = xr.open_dataset(file_path)
             temp_data, valid_mask = loader_func(ds, transect_lats, transect_lons)
@@ -269,27 +326,51 @@ def load_dataset_files(pattern, dataset_name, loader_func):
                 depth = np.array([0])
             
             data_dict[period] = {'temperature': temp_data, 'depth': depth, 'valid_mask': valid_mask}
+            input_files_used.append((dataset_name, period, str(file_path)))
+            print(f"   {dataset_name} {period}: {file_path.name} "
+                  f"({valid_mask.sum()}/{len(valid_mask)} points with data, {len(depth)} levels)")
             ds.close()
         except Exception as e:
             print(f"   ❌ Error loading {file_path.name}: {e}")
-    return data_dict
+    # Keep periods in chronological order (baseline first)
+    return {p: data_dict[p] for p in ALL_PERIODS if p in data_dict}
 
-print("\n📂 Loading model and reanalysis data...")
-print("   Using periods: Baseline (1993-2002), Period 1 (2003-2020), Period 2 (2021-2025)")
+print(f"\n📂 Loading model and reanalysis data from {data_dir}")
+print(f"   Using periods: Baseline ({BASELINE_PERIOD}), comparisons {COMPARISON_PERIODS}, OND")
 
 # Load all datasets (OND = October-November-December, or Q4)
-cmcc_data = load_dataset_files("**/CMCC-ESM2/*OND*.nc", "CMCC-ESM2", extract_from_curvilinear_grid)
-ec_data = load_dataset_files("**/EC-Earth3/*OND*.nc", "EC-Earth3", extract_from_curvilinear_grid)
-oras5_data = load_dataset_files("**/ORAS5/*OND*.nc", "ORAS5", extract_from_oras5)
-glorys_data = load_dataset_files("**/GLORYS/*OND*.nc", "GLORYS", extract_from_regular_grid)
+# CHANGE: EC-Earth3 removed; only the three products in the paper
+extractors = {
+    'extract_from_regular_grid': extract_from_regular_grid,
+    'extract_from_oras5': extract_from_oras5,
+    'extract_from_curvilinear_grid': extract_from_curvilinear_grid,
+}
+loaded = {}
+for name, pattern, func_name in PRODUCTS:
+    loaded[name] = load_dataset_files(pattern, name, extractors[func_name])
+glorys_data = loaded['GLORYS']
+oras5_data = loaded['ORAS5']
+cmcc_data = loaded['CMCC-ESM2']
 
-# Print summary of loaded data
+# CHANGE: stop if any product is missing a period, instead of silently
+# producing an incomplete set of figures
 print("\n📊 Data loaded summary:")
-for name, data_dict in [('CMCC-ESM2', cmcc_data), ('EC-Earth3', ec_data), ('ORAS5', oras5_data), ('GLORYS', glorys_data)]:
-    if data_dict:
-        print(f"   {name}: {list(data_dict.keys())}")
-    else:
-        print(f"   {name}: No data loaded!")
+missing = []
+for name, data_dict in loaded.items():
+    print(f"   {name}: {list(data_dict.keys())}")
+    for period in ALL_PERIODS:
+        if period not in data_dict:
+            missing.append(f"{name} {period}")
+if missing:
+    raise SystemExit(f"\n❌ Missing input for: {', '.join(missing)}. Check {data_dir}")
+
+# Points without data in ANY period/product are reported (land or coast)
+for name, data_dict in loaded.items():
+    for period, d in data_dict.items():
+        bad = np.where(~d['valid_mask'])[0]
+        if len(bad) > 0:
+            print(f"   ⚠️ {name} {period}: no data at {len(bad)} point(s), "
+                  f"latitudes {np.round(transect_lats[bad], 2).tolist()}")
 
 # ============================================
 # PART 5: PLOTTING FUNCTIONS
@@ -363,7 +444,8 @@ def plot_cross_section(data, depth, latitude, title, dataset_name, period, save_
     
     return fig
 
-def plot_difference_map(data_dict, dataset_name, depth, latitude, baseline_period, period, save_pdf=True, vmin=-2, vmax=2):
+def plot_difference_map(data_dict, dataset_name, depth, latitude, baseline_period, period, save_pdf=True,
+                        vmin=DIFF_VMIN, vmax=DIFF_VMAX, upper_depth=1000):
     """Create difference plot showing warming (red) and cooling (blue)"""
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
     diff_levels = np.linspace(vmin, vmax, 21)
@@ -371,8 +453,12 @@ def plot_difference_map(data_dict, dataset_name, depth, latitude, baseline_perio
     baseline_data = data_dict[baseline_period]['temperature']
     period_data = data_dict[period]['temperature']
     
-    # Upper 1000m difference
-    depth_mask = depth <= 1000
+    # Upper panel difference (upper_depth: 1000 m as in the draft, 700 m for XBT comparison)
+    # CHANGE: include the first level below upper_depth so the contours reach the panel bottom
+    depth_mask = depth <= upper_depth
+    below = np.where(depth > upper_depth)[0]
+    if len(below) > 0:
+        depth_mask[below[0]] = True
     depth_upper = depth[depth_mask]
     if baseline_data.ndim == 2:
         baseline_upper = baseline_data[depth_mask, :] if len(depth_mask) == baseline_data.shape[0] else baseline_data
@@ -392,10 +478,10 @@ def plot_difference_map(data_dict, dataset_name, depth, latitude, baseline_perio
                        levels=diff_levels, cmap='RdBu_r', vmin=vmin, vmax=vmax, extend='both')
     ax1.contour(latitude, depth_upper[:difference.shape[0]], difference, 
                 levels=[0], colors='black', linewidths=1.0, linestyles='--', alpha=0.7)
-    ax1.invert_yaxis()
+    ax1.set_ylim(upper_depth, 0)  # depth increasing downwards, fixed to the panel limit
     ax1.set_xlabel('Latitude (°N)')
     ax1.set_ylabel('Depth (m)')
-    ax1.set_title('0-1000m Difference')
+    ax1.set_title(f'0-{upper_depth}m Difference')
     ax1.set_xlim(latitude.max(), latitude.min())
     
     # Full depth difference
@@ -420,6 +506,7 @@ def plot_difference_map(data_dict, dataset_name, depth, latitude, baseline_perio
     
     plt.suptitle(f'{dataset_name}: {period} minus {baseline_period}\nRed = Warming, Blue = Cooling', y=1.02)
     plt.tight_layout()
+    fig.subplots_adjust(right=0.9)  # CHANGE: leave room for the colour bar
     
     # Add colorbar
     cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.7])
@@ -427,7 +514,8 @@ def plot_difference_map(data_dict, dataset_name, depth, latitude, baseline_perio
     cbar.set_ticks(np.arange(vmin, vmax+0.5, 0.5))
     
     if save_pdf:
-        pdf_filename = f"{dataset_name}_{period}_difference_map.pdf"
+        suffix = "" if upper_depth == 1000 else f"_0-{upper_depth}m"
+        pdf_filename = f"{dataset_name}_{period}_minus_{baseline_period}_difference_map{suffix}.pdf"
         save_figure_as_pdf(fig, pdf_filename)
         global pdf_counter
         pdf_counter["difference_maps"] += 1
@@ -470,8 +558,9 @@ def create_boxplot_figure(data_dict, dataset_name, depth, baseline_period, perio
             layer_diff = diff[:, layer_indices, :]
             layer_valid = valid_mask[layer_indices, :]
         values = layer_diff[layer_valid].flatten()
-        # Remove outliers beyond 3 sigma for cleaner plot
-        if len(values) > 0:
+        # Optional: remove outliers beyond 3 sigma (old behaviour, see TRIM_3SIGMA)
+        values = values[~np.isnan(values)]
+        if TRIM_3SIGMA and len(values) > 0:
             mean_val = np.mean(values)
             std_val = np.std(values)
             values = values[np.abs(values - mean_val) <= 3 * std_val]
@@ -504,7 +593,7 @@ def create_boxplot_figure(data_dict, dataset_name, depth, baseline_period, perio
     plt.tight_layout()
     
     if save_pdf:
-        pdf_filename = f"{dataset_name}_{period}_warming_boxplot.pdf"
+        pdf_filename = f"{dataset_name}_{period}_minus_{baseline_period}_warming_boxplot.pdf"
         save_figure_as_pdf(fig, pdf_filename)
         global pdf_counter
         pdf_counter["boxplots"] += 1
@@ -518,8 +607,7 @@ def create_boxplot_figure(data_dict, dataset_name, depth, baseline_period, perio
 # Cross-section plots for all datasets
 print("\n📊 Generating cross-section plots and PDFs...")
 cross_section_html = {}
-for name, data_dict in [('CMCC-ESM2', cmcc_data), ('EC-Earth3', ec_data), 
-                         ('ORAS5', oras5_data), ('GLORYS', glorys_data)]:
+for name, data_dict in loaded.items():
     if data_dict:
         cross_section_html[name] = {}
         for period, data in data_dict.items():
@@ -530,21 +618,17 @@ for name, data_dict in [('CMCC-ESM2', cmcc_data), ('EC-Earth3', ec_data),
 # Difference maps for ALL datasets with baseline 1993-2002
 print("\n📊 Generating difference maps and PDFs...")
 difference_html = {}
-datasets_to_compare = [
-    ('CMCC-ESM2', cmcc_data), 
-    ('EC-Earth3', ec_data),
-    ('ORAS5', oras5_data), 
-    ('GLORYS', glorys_data)
-]
+datasets_to_compare = list(loaded.items())
 
 for name, data_dict in datasets_to_compare:
-    if data_dict and '1993-2002' in data_dict:
+    if data_dict and BASELINE_PERIOD in data_dict:
         difference_html[name] = {}
-        depth = data_dict[list(data_dict.keys())[0]]['depth']
-        for period in data_dict.keys():
-            if period != '1993-2002':
-                fig = plot_difference_map(data_dict, name, depth, transect_lats, '1993-2002', period)
-                difference_html[name][period] = fig_to_base64(fig)
+        depth = data_dict[BASELINE_PERIOD]['depth']
+        for period in COMPARISON_PERIODS:
+            for upper_depth in UPPER_DEPTHS:
+                fig = plot_difference_map(data_dict, name, depth, transect_lats, BASELINE_PERIOD, period,
+                                          upper_depth=upper_depth)
+                difference_html[name][f"{period} (upper {upper_depth} m)"] = fig_to_base64(fig)
                 plt.close(fig)
 
 # Boxplots for ALL datasets with consistent y-axis
@@ -553,11 +637,11 @@ print("\n📊 Generating boxplots and PDFs...")
 # First, find the global y-axis limits across all datasets and periods
 all_warming_values = []
 for name, data_dict in datasets_to_compare:
-    if data_dict and '1993-2002' in data_dict:
-        depth = data_dict[list(data_dict.keys())[0]]['depth']
-        baseline_data = data_dict['1993-2002']['temperature']
-        for period in data_dict.keys():
-            if period != '1993-2002':
+    if data_dict and BASELINE_PERIOD in data_dict:
+        depth = data_dict[BASELINE_PERIOD]['depth']
+        baseline_data = data_dict[BASELINE_PERIOD]['temperature']
+        for period in COMPARISON_PERIODS:
+            if True:
                 period_data = data_dict[period]['temperature']
                 if period_data.ndim == 2 and baseline_data.ndim == 2:
                     diff = period_data - baseline_data
@@ -567,6 +651,7 @@ for name, data_dict in datasets_to_compare:
                 if valid_mask.ndim == 3:
                     valid_mask = valid_mask[0, :, :]
                 values = diff[valid_mask].flatten()
+                values = values[~np.isnan(values)]
                 if len(values) > 0:
                     values = values[np.abs(values) < 5]  # Remove extreme outliers
                     all_warming_values.extend(values)
@@ -580,12 +665,12 @@ else:
 
 boxplot_html = {}
 for name, data_dict in datasets_to_compare:
-    if data_dict and '1993-2002' in data_dict:
+    if data_dict and BASELINE_PERIOD in data_dict:
         boxplot_html[name] = {}
-        depth = data_dict[list(data_dict.keys())[0]]['depth']
-        for period in data_dict.keys():
-            if period != '1993-2002':
-                fig = create_boxplot_figure(data_dict, name, depth, '1993-2002', period, y_limit=global_y_limit)
+        depth = data_dict[BASELINE_PERIOD]['depth']
+        for period in COMPARISON_PERIODS:
+            if True:
+                fig = create_boxplot_figure(data_dict, name, depth, BASELINE_PERIOD, period, y_limit=global_y_limit)
                 boxplot_html[name][period] = fig_to_base64(fig)
                 plt.close(fig)
 
@@ -634,6 +719,7 @@ def compute_layer_statistics(data_dict, dataset_name, depth, baseline_period='19
                 layer_diff = diff[:, layer_indices, :]
                 layer_valid = valid_mask[layer_indices, :]
             valid_values = layer_diff[layer_valid]
+            valid_values = valid_values[~np.isnan(valid_values)]
             if len(valid_values) > 0:
                 results.append({
                     'Dataset': dataset_name,
@@ -641,18 +727,61 @@ def compute_layer_statistics(data_dict, dataset_name, depth, baseline_period='19
                     'Baseline': baseline_period,
                     'Depth Layer': layer_name,
                     'Mean Warming (°C)': np.mean(valid_values),
+                    'Median (°C)': np.median(valid_values),
                     'Std Dev (°C)': np.std(valid_values),
                     '25th Percentile': np.percentile(valid_values, 25),
-                    '75th Percentile': np.percentile(valid_values, 75)
+                    '75th Percentile': np.percentile(valid_values, 75),
+                    'N values': len(valid_values),
+                    'N native levels': len(layer_indices),
+                })
+    return pd.DataFrame(results)
+
+def compute_band_statistics(data_dict, dataset_name, depth, latitudes, baseline_period):
+    """Differences by latitude band and depth range, for writing the Results.
+
+    Statistics pool all native levels and transect points inside each box
+    (unweighted by layer thickness or distance), consistent with the boxplots.
+    """
+    baseline_data = data_dict[baseline_period]['temperature']
+    results = []
+    for period in COMPARISON_PERIODS:
+        diff = data_dict[period]['temperature'] - baseline_data
+        for band_name, lat_min, lat_max in LAT_BANDS:
+            in_band = (latitudes >= lat_min) & (latitudes < lat_max)
+            for d_min, d_max in BAND_DEPTH_RANGES:
+                in_depth = (depth >= d_min) & (depth < d_max)
+                values = diff[np.ix_(in_depth, in_band)].ravel()
+                values = values[~np.isnan(values)]
+                if len(values) == 0:
+                    continue
+                results.append({
+                    'Dataset': dataset_name,
+                    'Period': period,
+                    'Baseline': baseline_period,
+                    'Latitude band': band_name,
+                    'Depth range (m)': f"{d_min}-{d_max}",
+                    'Mean (°C)': np.mean(values),
+                    'Median (°C)': np.median(values),
+                    '25th Percentile': np.percentile(values, 25),
+                    '75th Percentile': np.percentile(values, 75),
+                    'Fraction positive': np.mean(values > 0),
+                    'N values': len(values),
+                    'N points': int(in_band.sum()),
                 })
     return pd.DataFrame(results)
 
 stats_data = {}
+band_stats = []
 for name, data_dict in datasets_to_compare:
-    if data_dict and '1993-2002' in data_dict:
-        first_period = list(data_dict.keys())[0]
-        depth = data_dict[first_period]['depth']
-        stats_data[name] = compute_layer_statistics(data_dict, name, depth, '1993-2002')
+    if data_dict and BASELINE_PERIOD in data_dict:
+        depth = data_dict[BASELINE_PERIOD]['depth']
+        stats_data[name] = compute_layer_statistics(data_dict, name, depth, BASELINE_PERIOD)
+        band_stats.append(compute_band_statistics(data_dict, name, depth, transect_lats, BASELINE_PERIOD))
+
+if band_stats:
+    band_file = stats_dir / "warming_statistics_by_latitude_band.csv"
+    pd.concat(band_stats, ignore_index=True).to_csv(band_file, index=False, float_format='%.4f')
+    print(f"✅ Latitude-band statistics saved to: {band_file}")
 
 # Save statistics to CSV
 if stats_data:
@@ -663,7 +792,7 @@ if stats_data:
     if all_stats:
         combined_stats = pd.concat(all_stats, ignore_index=True)
         stats_file = stats_dir / "warming_statistics_by_depth.csv"
-        combined_stats.to_csv(stats_file, index=False)
+        combined_stats.to_csv(stats_file, index=False, float_format='%.4f')
         print(f"✅ Statistics saved to: {stats_file}")
 
 # ============================================
@@ -693,12 +822,10 @@ html_content = f"""<!DOCTYPE html>
     <h1>Atlantic Ocean Warming Analysis</h1>
     <p>Transect: {transect_name}</p>
     <p>Number of sampling points: {len(transect_lats)}</p>
-    <p>Latitude range: {transect_lats.min():.1f}°S to {transect_lats.max():.1f}°N</p>
+    <p>Latitude range: {transect_lats.min():.1f}° to {transect_lats.max():.1f}°N</p>
     
-    <div class="warning">
-        <strong>Note:</strong> EC-Earth3 shows physically implausible patterns (warming increasing with depth) 
-        and should be excluded from the analysis. Focus on GLORYS (most reliable), ORAS5, and CMCC-ESM2.
-    </div>
+    <p>Season: October-December. Baseline {BASELINE_PERIOD}; comparison periods {', '.join(COMPARISON_PERIODS)}.
+    Input folder: {data_dir}. Generated {datetime.now():%Y-%m-%d %H:%M}.</p>
     
     <div class="section">
         <h2>Cross-Sections (Absolute Temperatures)</h2>
@@ -714,13 +841,13 @@ for name, periods in cross_section_html.items():
             </div>
         """
 
-html_content += """
+html_content += f"""
         </div>
     </div>
     
     <div class="section">
         <h2>Difference Maps (Warming/Cooling)</h2>
-        <p>Baseline: 1993-2002 | Red = Warming, Blue = Cooling</p>
+        <p>Baseline: {BASELINE_PERIOD} | Red = Warming, Blue = Cooling</p>
         <div class="plot-grid">
 """
 
@@ -728,18 +855,18 @@ for name, periods in difference_html.items():
     for period, img_base64 in periods.items():
         html_content += f"""
             <div class="plot">
-                <h3>{name} - {period} minus 1993-2002</h3>
+                <h3>{name} - {period} minus {BASELINE_PERIOD}</h3>
                 <img src="data:image/png;base64,{img_base64}" alt="{name} {period} diff">
             </div>
         """
 
-html_content += """
+html_content += f"""
         </div>
     </div>
     
     <div class="section">
         <h2>Boxplots (Warming by Depth Layer)</h2>
-        <p>Baseline: 1993-2002 | Consistent y-axis across all models for comparison</p>
+        <p>Baseline: {BASELINE_PERIOD} | Consistent y-axis across all products for comparison</p>
         <div class="plot-grid">
 """
 
@@ -747,7 +874,7 @@ for name, periods in boxplot_html.items():
     for period, img_base64 in periods.items():
         html_content += f"""
             <div class="plot">
-                <h3>{name} - {period} minus 1993-2002</h3>
+                <h3>{name} - {period} minus {BASELINE_PERIOD}</h3>
                 <img src="data:image/png;base64,{img_base64}" alt="{name} {period} boxplot">
             </div>
         """
@@ -759,7 +886,7 @@ if all_stats:
     
     <div class="section">
         <h2>Warming Statistics by Depth Layer</h2>
-        <p>Only showing datasets with physically plausible patterns (GLORYS, ORAS5, CMCC-ESM2)</p>
+        <p>GLORYS, ORAS5 and CMCC-ESM2</p>
         <table>
             <tr>
                 <th>Dataset</th>
@@ -773,9 +900,6 @@ if all_stats:
     """
     for df in all_stats:
         for _, row in df.iterrows():
-            # Skip EC-Earth3 in the table
-            if 'EC-Earth3' in row['Dataset']:
-                continue
             html_content += f"""
             <tr>
                 <td>{row['Dataset']}</td>
@@ -816,5 +940,19 @@ print(f"   • Boxplots: {pdf_counter['boxplots']} PDF files")
 print(f"   • Total PDFs: {sum(pdf_counter.values())} files")
 print(f"\n📄 HTML Report: {html_file}")
 print(f"📊 Statistics CSV: {stats_dir}/warming_statistics_by_depth.csv")
-print("\n⚠️  Note: EC-Earth3 shows physically implausible patterns and should be excluded from analysis")
+
+# CHANGE: record exactly which inputs and settings produced these outputs
+run_info = stats_dir / "run_info.txt"
+with open(run_info, 'w') as f:
+    f.write(f"Generated: {datetime.now():%Y-%m-%d %H:%M}\n")
+    f.write(f"Script: {Path(__file__).name}\n")
+    f.write(f"Season: OND\nBaseline: {BASELINE_PERIOD}\nComparison periods: {COMPARISON_PERIODS}\n")
+    f.write(f"Transect points: {transect_csv} ({len(transect_lats)} points)\n")
+    f.write(f"Extraction: GLORYS linear interpolation (regular grid); ORAS5 and CMCC-ESM2 nearest grid point\n")
+    f.write(f"Difference colour scale: {DIFF_VMIN} to {DIFF_VMAX} degC; boxplot y-limits: {global_y_limit}\n")
+    f.write(f"3-sigma trimming in boxplots: {TRIM_3SIGMA}\n")
+    f.write("Input files:\n")
+    for name, period, path in input_files_used:
+        f.write(f"  {name:10s} {period}  {path}\n")
+print(f"📝 Run information: {run_info}")
 print("\n" + "="*80)
