@@ -12,7 +12,7 @@ to match the observational periods used for the TSG/XBT composites:
   - Reuses the FIXED 100-point transect CSV from the previous run.
   - EC-Earth3 removed (no new files; excluded from the paper).
   - Extra 0-700 m difference sections for comparison with the XBT section (Fig. 5).
-  - Statistics now include median, n and latitude-band summaries.
+  - Statistics now include median and n; latitude-band statistics come from 05.
 Run 00_check_input_files.py first to verify the input files.
 """
 
@@ -69,15 +69,6 @@ DIFF_VMIN, DIFF_VMAX = -2, 2
 # caption. Default is now False (no trimming); set True to reproduce the old style.
 TRIM_3SIGMA = False
 
-# Latitude bands for the text (degrees N; south negative). Bands may overlap.
-LAT_BANDS = [
-    ("South (30-20S)", -31.0, -20.0),
-    ("XBT southern cooling band (20-10S)", -20.0, -10.0),
-    ("Tropics (20S-20N)", -20.0, 20.0),
-    ("XBT northern cooling band (10-20N)", 10.0, 20.0),
-    ("North (25-50N)", 25.0, 50.0),
-]
-BAND_DEPTH_RANGES = [(0, 100), (100, 200), (0, 700), (500, 1000), (500, 2000), (1000, 2000)]
 
 print("="*80)
 print("GENERATING COMPREHENSIVE HTML REPORT AND PDF EXPORTS")
@@ -363,6 +354,25 @@ for name, data_dict in loaded.items():
             missing.append(f"{name} {period}")
 if missing:
     raise SystemExit(f"\n❌ Missing input for: {', '.join(missing)}. Check {data_dir}")
+
+# CHANGE: save the extracted transect values (one small NetCDF per product),
+# so 05_composite_figure.py can make figures without re-reading the large files
+for name, data_dict in loaded.items():
+    depth_out = data_dict[BASELINE_PERIOD]['depth']
+    arr = np.stack([data_dict[p]['temperature'] for p in ALL_PERIODS])  # (period, depth, point)
+    point_ids = transect_df['point_id'].values if 'point_id' in transect_df else np.arange(len(transect_lats))
+    ds_out = xr.Dataset(
+        {'thetao': (('period', 'depth', 'point'), arr.astype('float32'))},
+        coords={'period': ALL_PERIODS, 'depth': depth_out,
+                'latitude': ('point', transect_lats), 'longitude': ('point', transect_lons),
+                'point_id': ('point', point_ids)},
+        attrs={'product': name, 'season': 'OND', 'source_script': Path(__file__).name,
+               'created': f"{datetime.now():%Y-%m-%d %H:%M}"})
+    ds_out['thetao'].attrs.update(units='degC', long_name='potential temperature along Polarstern median transect')
+    ds_out['depth'].attrs.update(units='m', positive='down', note='native levels of the product')
+    out_file = stats_dir / f"transect_extraction_{name}.nc"
+    ds_out.to_netcdf(out_file)
+    print(f"   💾 Saved extracted transect values: {out_file.name}")
 
 # Points without data in ANY period/product are reported (land or coast)
 for name, data_dict in loaded.items():
@@ -736,52 +746,14 @@ def compute_layer_statistics(data_dict, dataset_name, depth, baseline_period='19
                 })
     return pd.DataFrame(results)
 
-def compute_band_statistics(data_dict, dataset_name, depth, latitudes, baseline_period):
-    """Differences by latitude band and depth range, for writing the Results.
-
-    Statistics pool all native levels and transect points inside each box
-    (unweighted by layer thickness or distance), consistent with the boxplots.
-    """
-    baseline_data = data_dict[baseline_period]['temperature']
-    results = []
-    for period in COMPARISON_PERIODS:
-        diff = data_dict[period]['temperature'] - baseline_data
-        for band_name, lat_min, lat_max in LAT_BANDS:
-            in_band = (latitudes >= lat_min) & (latitudes < lat_max)
-            for d_min, d_max in BAND_DEPTH_RANGES:
-                in_depth = (depth >= d_min) & (depth < d_max)
-                values = diff[np.ix_(in_depth, in_band)].ravel()
-                values = values[~np.isnan(values)]
-                if len(values) == 0:
-                    continue
-                results.append({
-                    'Dataset': dataset_name,
-                    'Period': period,
-                    'Baseline': baseline_period,
-                    'Latitude band': band_name,
-                    'Depth range (m)': f"{d_min}-{d_max}",
-                    'Mean (°C)': np.mean(values),
-                    'Median (°C)': np.median(values),
-                    '25th Percentile': np.percentile(values, 25),
-                    '75th Percentile': np.percentile(values, 75),
-                    'Fraction positive': np.mean(values > 0),
-                    'N values': len(values),
-                    'N points': int(in_band.sum()),
-                })
-    return pd.DataFrame(results)
-
 stats_data = {}
-band_stats = []
 for name, data_dict in datasets_to_compare:
     if data_dict and BASELINE_PERIOD in data_dict:
         depth = data_dict[BASELINE_PERIOD]['depth']
         stats_data[name] = compute_layer_statistics(data_dict, name, depth, BASELINE_PERIOD)
-        band_stats.append(compute_band_statistics(data_dict, name, depth, transect_lats, BASELINE_PERIOD))
 
-if band_stats:
-    band_file = stats_dir / "warming_statistics_by_latitude_band.csv"
-    pd.concat(band_stats, ignore_index=True).to_csv(band_file, index=False, float_format='%.4f')
-    print(f"✅ Latitude-band statistics saved to: {band_file}")
+# NOTE: latitude-band statistics are written by 05_composite_figure.py, using the
+# same bands and depth grid as the composite figure (single source for the text)
 
 # Save statistics to CSV
 if stats_data:

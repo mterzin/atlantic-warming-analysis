@@ -80,6 +80,8 @@ SHOW_ZERO_CONTOUR = True
 COMMON_DEPTH_GRID = True
 GRID_DZ = 10.0             # m
 MIN_POINTS_PROFILE = 3     # minimum points with data for a band-profile value
+# Extra depth ranges (m) for the latitude-band table, in addition to DEPTH_LAYERS
+BAND_TABLE_EXTRA_RANGES = [(0, 700), (500, 2000)]
 
 # Boxplots: whiskers at 1.5 x IQR (clipped to the data range), no outliers
 WHIS = 1.5
@@ -213,6 +215,30 @@ for key, *_ in LAT_BANDS:
                     prof_rows.append({'Band': key, 'Dataset': prod, 'Period': period,
                                       'Depth (m)': d, 'Median': m, 'Q25': a, 'Q75': b})
 pd.DataFrame(prof_rows).to_csv(out_dir / f"{FIG_NAME}_profile_values.csv", index=False, float_format='%.4f')
+
+# Latitude-band statistics with EXACTLY the bands of the figure (strip, map and
+# profile panels), for the boxplot layers plus extra ranges used in the text.
+band_rows = []
+for key, label, south, north in LAT_BANDS:
+    mask = band_of_point == key
+    for prod in PRODUCTS:
+        for period in PERIODS:
+            for layer in DEPTH_LAYERS + BAND_TABLE_EXTRA_RANGES:
+                v = layer_values(prod, period, layer, mask)
+                if len(v) == 0:
+                    continue
+                band_rows.append({'Dataset': prod, 'Period': period, 'Baseline': BASELINE,
+                                  'Band': key, 'Latitude band': label,
+                                  'South limit (°N)': south, 'North limit (°N)': north,
+                                  'Depth range (m)': f"{layer[0]}-{layer[1]}",
+                                  'Mean (°C)': np.mean(v), 'Median (°C)': np.median(v),
+                                  '25th Percentile': np.percentile(v, 25),
+                                  '75th Percentile': np.percentile(v, 75),
+                                  'Fraction positive': np.mean(v > 0),
+                                  'N values': len(v), 'N points': int(mask.sum())})
+band_file = out_dir / f"{FIG_NAME}_latitude_band_statistics.csv"
+pd.DataFrame(band_rows).to_csv(band_file, index=False, float_format='%.4f')
+print(f"   Saved {band_file.name}")
 
 # ============================================
 # PART 4: PLOTTING HELPERS
