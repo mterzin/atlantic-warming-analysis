@@ -83,12 +83,12 @@ MIN_POINTS_PROFILE = 3     # minimum points with data for a band-profile value
 
 # Boxplots: whiskers at 1.5 x IQR (clipped to the data range), no outliers
 WHIS = 1.5
-BOX_XLIM = None            # e.g. (-1.5, 2.0); None = automatic, shared by both rows
-PROFILE_XLIM = None        # None = automatic, shared by all band panels
+BOX_XLIM = (-2.0, 2.0)     # degC; None = automatic, shared by both rows
+PROFILE_XLIM = 'box'       # 'box' = same as BOX_XLIM; or e.g. (-1, 1.5); None = automatic
 
 USE_CARTOPY = True         # falls back to a plain map if cartopy is unavailable
 MAP_EXTENT = [-28, 18, -33, 56]   # lon min, lon max, lat min, lat max
-MAP_SHOW_BANDS = False     # True: colour the map points by latitude band
+MAP_SHOW_BANDS = True      # shade the latitude bands on the map and colour the points
 
 MAKE_BAND_HEATMAP = False  # separate heatmap figure, for comparison
 FIG_SIZE = (19, 14)
@@ -275,9 +275,13 @@ def draw_map(ax, use_cartopy):
         full = pd.read_csv(FULL_TRANSECT_CSV).dropna(subset=['longitude'])
         ax.plot(full['longitude'], full['latitude'], color='#8B0000', lw=1.2, alpha=0.5, zorder=2, **kw)
     if MAP_SHOW_BANDS:
-        for (key, *_), col in zip(LAT_BANDS, BAND_COLORS):
+        for (key, _, south, north), col in zip(LAT_BANDS, BAND_COLORS):
+            lo, hi = max(south, MAP_EXTENT[2]), min(north, MAP_EXTENT[3])
+            ax.fill_between(MAP_EXTENT[:2], lo, hi, color=col, alpha=0.15, lw=0, zorder=0.5, **kw)
+            ax.text(MAP_EXTENT[0] + 1, (lo + hi) / 2, key, ha='left', va='center', fontsize=9,
+                    color=col, fontweight='bold', zorder=4, **kw)
             m = band_of_point == key
-            ax.scatter(lons[m], lats[m], s=14, color=col, edgecolor='k', lw=0.3, zorder=3, **kw)
+            ax.scatter(lons[m], lats[m], s=16, color=col, edgecolor='k', lw=0.3, zorder=3, **kw)
     else:
         ax.scatter(lons, lats, marker='x', s=16, color='#8B0000', lw=0.9, zorder=3, **kw)
     ax.set_anchor('N')
@@ -413,13 +417,16 @@ def automatic_limits():
 print("\n🎨 Drawing composite figure...")
 auto_box, auto_prof = automatic_limits()
 box_xlim = BOX_XLIM or auto_box
-prof_xlim = PROFILE_XLIM or auto_prof
+if PROFILE_XLIM == 'box':
+    prof_xlim = box_xlim
+else:
+    prof_xlim = PROFILE_XLIM or auto_prof
 levels = np.linspace(-SECTION_VMAX, SECTION_VMAX, SECTION_LEVELS)
 norm = BoundaryNorm(levels, ncolors=plt.get_cmap('RdBu_r').N, extend='both')
 
 fig = plt.figure(figsize=FIG_SIZE)
 outer = GridSpec(2, 2, figure=fig, width_ratios=[1.35, 6.2], height_ratios=[2.5, 1.0],
-                 wspace=0.06, hspace=0.22)
+                 wspace=0.13, hspace=0.22)
 nprod = len(PRODUCTS)
 # top right: section columns | colour bar | spacer | boxplots
 top = GridSpecFromSubplotSpec(len(PERIODS) + 1, nprod + 3, subplot_spec=outer[0, 1],
@@ -439,7 +446,7 @@ if not use_cartopy:
     ax_map = fig.add_subplot(outer[0, 0])
 draw_map(ax_map, use_cartopy)
 
-# sections and boxplots, row by row so letters run left to right
+# sections first (letters b-g), then boxplots (letters h-i)
 section_axes = []
 box_axes = []
 cf = None
@@ -457,6 +464,8 @@ for r, period in enumerate(PERIODS):
         ax.tick_params(labelbottom=False)
         row_axes.append(ax)
     section_axes.append(row_axes)
+
+for r, period in enumerate(PERIODS):
     ax_box = fig.add_subplot(top[r, nprod + 2], sharex=box_axes[0] if box_axes else None)
     draw_boxplot(ax_box, period, box_xlim, legend=(r == 0))
     if r == len(PERIODS) - 1:
